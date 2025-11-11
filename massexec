@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Функция выводит краткую справку и завершает работу скрипта с ошибкой.
+# Используется во всех местах, где детальная диагностика не требуется
+# (например, когда аргументы переданы неверно).
+usage() {
+  cat <<USAGE >&2
+Usage: massexec.sh [--path dirpath] [--mask mask] [--number number] command
+USAGE
+  exit 1
+}
+
+# Значения по умолчанию для всех входных параметров. Каталог — текущий,
+# маска — любая строка, а число параллельных процессов будет определено позже.
+path_dir="$PWD"
+mask="*"
+max_parallel=""
+command_arg=""
+
+# Обходим аргументы в формате --ключ значение до тех пор, пока не встретим
+# первое позиционное значение, которое и будет обрабатывающей командой.
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --path)
+      [[ $# -ge 2 ]] || { echo "Missing value for --path" >&2; usage; }
+      path_dir="$2"
+      shift 2
+      ;;
+    --mask)
+      [[ $# -ge 2 ]] || { echo "Missing value for --mask" >&2; usage; }
+      mask="$2"
+      shift 2
+      ;;
+    --number)
+      [[ $# -ge 2 ]] || { echo "Missing value for --number" >&2; usage; }
+      max_parallel="$2"
+      shift 2
+      ;;
+    --help)
+      usage
+      ;;
+    --*)
+      echo "Unknown option: $1" >&2
+      usage
+      ;;
+    *)
+      command_arg="$1"
+      shift
+      break
+      ;;
+  esac
+done
+
+# После чтения опций обязательно должна остаться команда для выполнения,
+# а остальные аргументы запрещены.
+if [[ -z "$command_arg" || $# -gt 0 ]]; then
+  usage
+fi
+
+# Проверяем, что каталог существует и доступен, и фиксируем его абсолютный путь.
+if ! dir_abs=$(cd "$path_dir" 2>/dev/null && pwd); then
+  echo "Directory '$path_dir' is not accessible" >&2
+  exit 1
+fi
+
+# Пустая маска недопустима, иначе wildcard раскроется в пустую строку.
+if [[ -z "$mask" ]]; then
+  echo "Mask must not be empty" >&2
+  exit 1
+fi
+
+# Команду разрешаем указывать как абсолютный/относительный путь или имя из PATH.
+if ! command_path=$(command -v "$command_arg" 2>/dev/null); then
+  echo "Command '$command_arg' not found or not executable" >&2
+  exit 1
+fi
+
+# Даже если команда найдена, перепроверяем, что она действительно исполняемая.
+if [[ ! -x "$command_path" ]]; then
+  echo "Command '$command_path' is not executable" >&2
+  exit 1
+fi
+
+# Если ограничение по числу процессов не передано, используем количество CPU.
+# Падение вспомогательных команд (например, в контейнере) приводит к запасному значению 1.
+if [[ -z "$max_parallel" ]]; then
+  if ! max_parallel=$(nproc 2>/dev/null); then
+    if ! max_parallel=$(getconf _NPROCESSORS_ONLN 2>/dev/null); then
+      max_parallel=1
+    fi
+  fi
+fi
+
+# Проверяем, что значение --number корректно: только положительные целые.
+if ! [[ "$max_parallel" =~ ^[0-9]+$ ]] || (( max_parallel <= 0 )); then
+  echo "--number must be a positive integer" >&2
+  exit 1
+fi
+
+# Проверяем, поддерживает ли текущий Bash опцию wait -n (появилась в версии 5).
+if builtin help wait 2>/dev/null | grep -q -- '-n'; then
+  use_wait_n=1
+else
+  use_wait_n=0
+fi
+
+# Собираем список подходящих файлов в указанном каталоге.
+#   * Используем nullglob, чтобы отсутствие совпадений не давало литеральную маску;
+#   * в список попадают только обычные файлы (регулярные) без символьных ссылок;
+#   * храним абсолютные пути, чтобы команда обработки могла запускаться из любого каталога.
+mapfile -t files < <(
+  cd "$dir_abs"
+  shopt -s nullglob
+  IFS=$'\n'
+  for candidate in $mask; do
+    if [[ -f "$candidate" && ! -L "$candidate" ]]; then
+      printf '%s\n' "$dir_abs/$candidate"
+    fi
+  done
+)
+
+# Если подходящих файлов нет — работу можно завершить без ошибок.
+if [[ ${#files[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+# Счётчик активных дочерних процессов, чтобы не превышать лимит параллелизма.
+active=0
+exit_code=0
+declare -a pids=()
+
+wait_for_child() {
+  local status=0
+  if (( use_wait_n )); then
+    if ! wait -n; then
+      status=$?
+      if (( status != 0 )) && (( exit_code == 0 )); then
+        exit_code=$status
+      fi
+    fi
+  else
+    local pid="${pids[0]}"
+    if ! wait "$pid"; then
+      status=$?
+      if (( status != 0 )) && (( exit_code == 0 )); then
+        exit_code=$status
+      fi
+    fi
+    pids=("${pids[@]:1}")
+  fi
+  (( active-- ))
+}
+
+# Для каждого файла запускаем команду в фоне. Если достигнут лимит,
+# ждём завершения любого дочернего процесса (wait -n) и уменьшаем счётчик.
+for file_path in "${files[@]}"; do
+  "$command_path" "$file_path" &
+  if (( ! use_wait_n )); then
+    pids+=("$!")
+  fi
+  active=$((active + 1))
+
+  if (( active >= max_parallel )); then
+    wait_for_child
+  fi
+done
+
+# По завершении цикла дожидаемся всех оставшихся фоновых процессов.
+while (( active > 0 )); do
+  if (( ! use_wait_n && ${#pids[@]} == 0 )); then
+    # На случай непредвиденных ситуаций отрабатываем последовательно.
+    break
+  fi
+  wait_for_child
+done
+
+# При отсутствии wait -n возможно, что остались процессы (например, если break сработал).
+if (( ! use_wait_n )); then
+  for pid in "${pids[@]}"; do
+    if ! wait "$pid"; then
+      status=$?
+      if (( status != 0 )) && (( exit_code == 0 )); then
+        exit_code=$status
+      fi
+    fi
+  done
+fi
+
+exit "$exit_code"

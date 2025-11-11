@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+
+# Рекурсивно переименовывает файловые суффиксы в указанном каталоге.
+# Использование: chsuf КАТАЛОГ СТАРЫЙ_СУФФИКС НОВЫЙ_СУФФИКС
+# Пример: chsuf ./src .txt .md
+
+set -euo pipefail
+# -e : аварийно завершаться при первой ошибке.
+# -u : считать использование неинициализированных переменных ошибкой.
+# -o pipefail : передавать код ошибки из любой команды в конвейере.
+
+err() {
+  printf 'chsuf: %s\n' "$*" >&2
+}
+
+usage() {
+  err "usage: chsuf DIRECTORY OLD_SUFFIX NEW_SUFFIX"
+  exit 1
+}
+
+# Проверка, что суффикс выглядит как `.ext` и не содержит лишних точек.
+is_valid_suffix() {
+  local suffix=$1
+
+  [[ ${#suffix} -ge 2 ]] || return 1
+  [[ ${suffix:0:1} == "." ]] || return 1
+  [[ ${suffix:1} != *.* ]] || return 1
+  return 0
+}
+
+[[ $# -eq 3 ]] || usage
+
+directory=$1
+old_suffix=$2
+new_suffix=$3
+
+if [[ ! -d $directory ]]; then
+  err "not a directory: $directory"
+  exit 1
+fi
+
+if ! is_valid_suffix "$old_suffix"; then
+  err "invalid old suffix: $old_suffix"
+  exit 1
+fi
+
+if ! is_valid_suffix "$new_suffix"; then
+  err "invalid new suffix: $new_suffix"
+  exit 1
+fi
+
+# Обходим дерево каталогов нулём-терминированными путями, чтобы корректно обрабатывать пробелы/переводы строк.
+while IFS= read -r -d '' path; do
+  # Разбиваем путь на имя каталога и имя файла.
+  file_name=${path##*/}
+  dir_name=${path%/*}
+  [[ $dir_name != "$path" ]] || dir_name="."
+
+  # Отбрасываем файлы без нужного суффикса и имена, совпадающие только с суффиксом.
+  [[ $file_name == *"$old_suffix" ]] || continue
+  [[ $file_name != "$old_suffix" ]] || continue
+
+  # Заменяем только окончание имени, совпадающее с целевым суффиксом.
+  new_name=${file_name/%"$old_suffix"/"$new_suffix"}
+  [[ $new_name != "$file_name" ]] || continue
+
+  # Собираем путь к новому файлу, сохраняя расположение.
+  if [[ $dir_name == "." ]]; then
+    new_path=$new_name
+  else
+    new_path="${dir_name}/${new_name}"
+  fi
+
+  # Проверяем, что файл с новым именем ещё не существует.
+  if [[ -e "$new_path" ]]; then
+    err "target exists, skipping: $new_path"
+    continue
+  fi
+
+  mv -- "$path" "$new_path"
+done < <(find "$directory" -type f -print0)

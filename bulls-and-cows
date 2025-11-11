@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+trap 'echo -e "\nЗавершить сценарий можно, введя «q» или «Q»."; ' INT
+
+cat <<'MSG'
+********************************************************************************
+* Я загадал 4-значное число с неповторяющимися цифрами. На каждом ходу делайте *
+* попытку отгадать загаданное число. Попытка - это 4-значное число с           *
+* неповторяющимися цифрами.                                                    *
+********************************************************************************
+MSG
+
+gen_secret() {                    # 4 разные цифры, первая не 0
+  local s='' d; local -A seen=()
+  s+="$(( (RANDOM%9)+1 ))"; seen["${s:0:1}"]=1
+  while ((${#s}<4)); do d=$((RANDOM%10)); [[ ${seen[$d]:-} ]] && continue; seen[$d]=1; s+="$d"; done
+  echo "$s"
+}
+
+valid() {                         # 4 цифры, первая не 0, без повторов
+  [[ $1 =~ ^[1-9][0-9]{3}$ ]] || return 1
+  local -A u=(); local c; for ((i=0;i<4;i++)); do c="${1:i:1}"; [[ ${u[$c]:-} ]] && return 1; u[$c]=1; done
+}
+
+score() {                         # печатает: "<bulls> <cows>"
+  local sec=$1 g=$2 b=0 c=0 i j
+  for ((i=0;i<4;i++)); do [[ ${g:i:1} == ${sec:i:1} ]] && ((b++)); done
+  for ((i=0;i<4;i++)); do for ((j=0;j<4;j++)); do [[ ${g:i:1} == ${sec:j:1} ]] && ((c++)); done; done
+  echo "$b $((c-b))"
+}
+
+secret="$(gen_secret)"
+echo $secret
+try=0
+HIST=()
+
+while :; do
+  try=$((try+1))
+  echo -n "Попытка ${try}: "
+  if ! IFS= read -r guess; then echo; try=$((try-1)); continue; fi
+
+  [[ $guess == q || $guess == Q ]] && exit 1
+  if ! valid "$guess"; then
+    echo "Ошибка: введите 4-значное число без повторов (первая цифра не 0) или 'q'/'Q'."
+    try=$((try-1)); continue
+  fi
+
+  read -r bulls cows <<<"$(score "$secret" "$guess")"
+  echo "Коров - ${cows}, Быков - ${bulls}"
+
+  HIST+=("${try}. ${guess} (Коров - ${cows} Быков - ${bulls})")
+  echo -e "\nИстория ходов:"; for h in "${HIST[@]}"; do echo "$h"; done; echo
+
+  ((bulls==4)) && { echo "Вы угадали загаданное число: ${secret}"; exit 0; }
+done
+

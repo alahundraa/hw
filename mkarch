@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Вывод справки по использованию скрипта и завершение с ошибкой
+usage() {
+  cat <<USAGE >&2
+Usage: mkarch -d dir_path -n name
+Options:
+  -d dir_path  Directory to package (required)
+  -n name      Output self-extracting script name (required)
+USAGE
+  exit 1
+}
+
+# Инициализация переменных для параметров командной строки
+dir_path=""
+archive_name=""
+
+# Разбор опций -d и -n (обязательно), -h выводит справку
+while getopts ":d:n:h" opt; do
+  case "$opt" in
+    d) dir_path="$OPTARG" ;;
+    n) archive_name="$OPTARG" ;;
+    h) usage ;;
+    :) echo "Option -$OPTARG requires an argument." >&2; usage ;;
+    \?) usage ;;
+  esac
+done
+
+# Проверка, что обе обязательные опции заданы
+if [[ -z "$dir_path" || -z "$archive_name" ]]; then
+  echo "Both -d and -n options are required." >&2
+  usage
+fi
+
+# Имя результирующего скрипта должно быть простым файлом, без пути
+if [[ "$archive_name" = */* ]]; then
+  echo "Archive name must not contain '/'." >&2
+  exit 1
+fi
+
+# Проверка существования исходного каталога
+if [[ ! -d "$dir_path" ]]; then
+  echo "Directory '$dir_path' does not exist." >&2
+  exit 1
+fi
+
+# Получаем абсолютный путь каталога, чтобы избежать относительных путей
+if ! dir_abs=$(cd "$dir_path" 2>/dev/null && pwd); then
+  echo "Cannot access directory '$dir_path'." >&2
+  exit 1
+fi
+
+# Абсолютный путь к итоговому самораспаковывающемуся скрипту
+script_path="$PWD/$archive_name"
+
+# Предотвращаем перезапись существующего файла
+if [[ -e "$script_path" ]]; then
+  echo "Target '$script_path' already exists." >&2
+  exit 1
+fi
+
+# Создаём временный файл под tar-архив и гарантируем удаление при выходе
+archive_file=$(mktemp)
+trap 'rm -f "$archive_file"' EXIT
+
+# Вычисляем родительский каталог и имя каталога для упаковки
+# Это позволяет корректно создавать архив с правильной структурой
+dir_parent=$(dirname "$dir_abs")
+dir_base=$(basename "$dir_abs")
+
+# Формируем tar.gz архив из указанного каталога
+# Используем -C, чтобы избежать лишних путей в архиве
+# и получить корневую папку с именем каталога
+#
+tar -czf "$archive_file" -C "$dir_parent" "$dir_base"
+
+# Генерируем оболочку самораспаковывающегося архива
+# До маркера __ARCHIVE_BELOW__ располагается исполняемый скрипт, который
+# распакует присоединённый tar.gz архив во время запуска
+cat > "$script_path" <<'PAYLOAD_SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Функция выводит справку по запуску распаковщика
+usage() {
+  cat <<USAGE >&2
+Usage: ${0##*/} [-o output_directory]
+Options:
+  -o output_directory  Target directory for extraction (default: current directory)
+USAGE
+  exit 1
+}
+
+# Каталог по умолчанию — текущая директория запуска
+output_dir="."
+
+# Разбираем опциональную опцию -o для указания каталога распаковки
+while getopts ":o:h" opt; do
+  case "$opt" in
+    o) output_dir="$OPTARG" ;;
+    h) usage ;;
+    :) echo "Option -$OPTARG requires an argument." >&2; usage ;;
+    \?) usage ;;
+  esac
+done
+
+# Удаляем обработанные опции из аргументов и убеждаемся, что больше аргументов нет
+shift $((OPTIND - 1))
+if [[ $# -ne 0 ]]; then
+  usage
+fi
+
+# Пустой путь распаковки недопустим
+if [[ -z "$output_dir" ]]; then
+  echo "Output directory must not be empty." >&2
+  exit 1
+fi
+
+# Создаём каталог распаковки (если его не было)
+mkdir -p "$output_dir"
+
+# Определяем строку, с которой начинается внедрённый архив
+payload_line=$(awk '/^__ARCHIVE_BELOW__/ {print NR + 1; exit}' "$0")
+if [[ -z "$payload_line" ]]; then
+  echo "Archive marker not found." >&2
+  exit 1
+fi
+
+# Извлекаем содержимое архива (всё, что идёт после маркера) и распаковываем в указанный каталог
+if ! tail -n +"$payload_line" "$0" | tar -xz -C "$output_dir"; then
+  echo "Extraction failed." >&2
+  exit 1
+fi
+
+exit 0
+
+__ARCHIVE_BELOW__
+PAYLOAD_SCRIPT
+
+# Присоединяем tar.gz архив к скрипту
+cat "$archive_file" >> "$script_path"
+
+# Делаем получившийся самораспаковывающийся скрипт исполняемым
+chmod +x "$script_path"

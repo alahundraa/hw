@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+
+# Считает статистику по суффиксам файлов в каталоге (рекурсивно).
+# Использование: stsuf КАТАЛОГ
+
+set -euo pipefail
+# -e : завершаться при первой ошибке.
+# -u : считать использование неинициализированных переменных ошибкой.
+# -o pipefail : передавать код ошибки из любой команды в конвейере.
+
+err() {
+  printf 'stsuf: %s\n' "$*" >&2
+}
+
+usage() {
+  err "использование: stsuf КАТАЛОГ"
+  exit 1
+}
+
+[[ $# -eq 1 ]] || usage
+
+target_dir=$1
+
+if [[ ! -d $target_dir ]]; then
+  err "не каталог: $target_dir"
+  exit 1
+fi
+
+# Определяем суффикс по правилам задачи.
+get_suffix() {
+  local base=$1
+
+  if [[ $base == .* ]]; then
+    local rest=${base:1}
+    if [[ -z $rest ]]; then
+      printf 'no suffix'
+      return
+    fi
+    if [[ $rest == *.* ]]; then
+      printf '.%s' "${rest##*.}"
+      return
+    else
+      printf 'no suffix'
+      return
+    fi
+  fi
+
+  if [[ $base == *.* ]]; then
+    printf '.%s' "${base##*.}"
+  else
+    printf 'no suffix'
+  fi
+}
+# асоциативный массив
+declare -A suffix_counts=()
+
+# Собираем все файлы и считаем количество каждого суффикса.
+mapfile -d '' -t file_paths < <(find "$target_dir" -type f -print0) || true
+
+for file_path in "${file_paths[@]}"; do
+  file_name=${file_path##*/}
+  suffix=$(get_suffix "$file_name")
+  ((++suffix_counts["$suffix"]))
+done
+
+# Выводим статистику по убыванию количества.
+if (( ${#suffix_counts[@]} > 0 )); then
+  tmp_output=$(mktemp "${TMPDIR:-/tmp}/stsuf.XXXXXX")
+  for key in "${!suffix_counts[@]}"; do
+    printf '%d\t%s\n' "${suffix_counts[$key]}" "$key" >>"$tmp_output"
+  done
+
+  while IFS=$'\t' read -r count key; do
+    printf '%s: %d\n' "$key" "$count"
+  done < <(sort -t $'\t' -k1,1nr -k2,2 "$tmp_output")
+
+  rm -f "$tmp_output"
+fi

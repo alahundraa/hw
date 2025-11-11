@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# tower-of-hanoi — интерактивная башня Ханой (bash 5.2+)
+set -euo pipefail
+trap 'printf "\nЧтобы выйти, введите q/Q\n"' INT
+
+# стеки: top = конец массива; A = 8..1 (1 сверху)
+A=(8 7 6 5 4 3 2 1); B=(); C=()
+readonly MAX_LEVELS=${#A[@]}
+readonly MAX_VALUE=${A[0]}
+readonly DIGITS=${#MAX_VALUE}
+readonly COL_WIDTH=$(( DIGITS + 3 ))
+
+disk='' # используется для сохранения значения при pop
+
+# базовые операции (используем bash nameref; важно запускать под bash)
+push() { local -n S=$1; local v=$2; S+=("$v"); }
+pop()  { local -n S=$1; local -n out=$2; local n=${#S[@]}; ((n==0)) && return 1; local idx=$((n-1)); out=${S[$idx]}; unset "S[$idx]"; }
+peek() { local -n S=$1; local n=${#S[@]}; if ((n==0)); then echo 0; else echo "${S[$((n-1))]}"; fi; }
+
+# печать одной «ячейки» столбца (row=0 сверху)
+cell() {
+  local -n S=$1
+  local row=$2
+  local len=${#S[@]}
+  local offset=$(( MAX_LEVELS - len ))
+  if (( row < offset )); then
+    printf "|%*s| " "$DIGITS" ""
+    return
+  fi
+
+  local idx=$(( len - 1 - (row - offset) ))
+  printf "|%*s| " "$DIGITS" "${S[$idx]}"
+}
+draw() {
+  local row
+  for ((row=0; row<MAX_LEVELS; row++)); do
+    cell A "$row"
+    cell B "$row"
+    cell C "$row"
+    printf "\n"
+  done
+
+  printf "%-*s%-*s%-*s\n" "$COL_WIDTH" "+-+" "$COL_WIDTH" "+-+" "$COL_WIDTH" "+-+"
+  printf "%-*s%-*s%-*s\n" "$COL_WIDTH" " A" "$COL_WIDTH" " B" "$COL_WIDTH" " C"
+}
+
+is_win() { local -n S=$1; [[ "${S[*]-}" == "8 7 6 5 4 3 2 1" ]]; }
+ref_of() { case "$1" in a) echo A;; b) echo B;; c) echo C;; *) return 1;; esac; }
+
+step=1
+while :; do
+  draw
+  read -r -p "Ход № ${step} (откуда, куда): " line || { printf "\n"; continue; }
+  line="$(tr -d ' ' <<<"$line")"
+  line="$(tr '[:upper:]' '[:lower:]' <<<"$line")"
+  [[ "$line" == "q" ]] && exit 1
+  if [[ ! "$line" =~ ^[abc]{2}$ ]]; then echo "Ошибка ввода! Пример: ab, A c, bA"; continue; fi
+
+  src=${line:0:1}; dst=${line:1:1}
+  [[ "$src" == "$dst" ]] && { echo "Нужно два РАЗНЫХ стека."; continue; }
+
+  sref=$(ref_of "$src") || { echo "Неизвестный стек."; continue; }
+  dref=$(ref_of "$dst") || { echo "Неизвестный стек."; continue; }
+
+  stop="$(peek "$sref")"; dtop="$(peek "$dref")"
+  (( stop == 0 )) && { echo "Источник пуст."; continue; }
+  if (( dtop!=0 && stop > dtop )); then echo "Такое перемещение запрещено!"; continue; fi
+
+  pop "$sref" disk
+  push "$dref" "$disk"
+
+  if is_win B || is_win C; then
+    draw; echo "Победа за ${step} ходов!"; exit 0
+  fi
+  step=$((step+1))
+done
